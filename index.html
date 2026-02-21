@@ -596,7 +596,7 @@
         </div>
 
         <!-- Setup Box -->
-        <div class="setup-box" id="setupBox">
+        <div class="setup-box" id="setupBox" style="display:none;">
             <div class="setup-title">⚙️ ตั้งค่าการเชื่อมต่อครั้งแรก</div>
             
             <div class="instructions">
@@ -1117,11 +1117,12 @@
 
         window.addEventListener('load', () => {
             const savedUrl = localStorage.getItem('sheetUrl');
+            document.getElementById('searchBox').classList.add('active');
             if (savedUrl) {
                 document.getElementById('sheetUrl').value = savedUrl;
-                document.getElementById('setupBox').style.display = 'none';
-                document.getElementById('searchBox').classList.add('active');
                 loadFromGoogleSheets();
+            } else {
+                openChangeUrlModal();
             }
         });
     </script>
