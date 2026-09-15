@@ -180,12 +180,16 @@ body {
 <script>
 let products = [];
 
-// ดึงการเชื่อมต่อแบบ JSONP จากโค้ดเดิมกลับมา เพื่อให้ Apps Script ส่งข้อมูลคอลัมน์ U ได้ครบถ้วน
+// ขยายเวลา Timeout เป็น 25 วินาที เพื่อรองรับ Cold Start ของ Apps Script
 function fetchWithJSONP(url) {
   return new Promise((resolve, reject) => {
     const cbName = 'cb_' + Date.now();
     const script = document.createElement('script');
-    const timer = setTimeout(() => { cleanup(); reject(new Error('JSONP timeout')); }, 10000);
+    
+    const timer = setTimeout(() => { 
+      cleanup(); 
+      reject(new Error('JSONP timeout')); 
+    }, 25000);
 
     function cleanup() {
       clearTimeout(timer);
@@ -309,31 +313,50 @@ document.getElementById('searchInput')?.addEventListener('input', function(e) {
   renderProducts(filtered);
 });
 
+// โหลดข้อมูลแบบ Retry และสลับการดึงเพื่อความเสถียรสูงสุด
 async function loadFromGoogleSheets() {
   const url = document.getElementById('sheetUrl').value.trim();
   if (!url) return;
 
   document.getElementById('results').innerHTML = '<div style="color:white; text-align:center; padding:30px;">กำลังโหลดข้อมูล...</div>';
 
-  try {
-    let responseText = null;
-    // ใช้ JSONP ก่อนเป็นอันดับแรกเหมือนโค้ดเดิม เพื่อดึงคอลัมน์รูปภาพมาให้ครบ
-    try { responseText = await fetchWithJSONP(url); } catch(e) {}
+  let responseText = null;
+  let attempts = 0;
+  const maxAttempts = 2;
 
-    if (!responseText) {
-      const r = await fetch(url);
-      if (r.ok) responseText = await r.text();
+  while (attempts < maxAttempts && !responseText) {
+    attempts++;
+    try {
+      // ลองวิธี JSONP ก่อนเป็นหลักเพื่อรองรับการดึงรูปภาพคอลัมน์ U
+      responseText = await fetchWithJSONP(url);
+    } catch (jsonpErr) {
+      console.warn(`JSONP Attempt ${attempts} failed, trying Direct Fetch...`);
+      try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 15000);
+        
+        const r = await fetch(url, { signal: controller.signal });
+        clearTimeout(timeoutId);
+
+        if (r.ok) responseText = await r.text();
+      } catch (fetchErr) {
+        console.warn(`Fetch Attempt ${attempts} failed.`);
+      }
     }
+  }
 
-    if (!responseText) throw new Error('ไม่สามารถดึงข้อมูลได้');
-
+  if (responseText) {
     parseData(responseText);
     localStorage.setItem('sheetUrl', url);
 
     document.getElementById('setupBox').style.display = 'none';
     document.getElementById('searchBox').classList.add('active');
-  } catch (error) {
-    document.getElementById('results').innerHTML = '<div style="color:white; text-align:center; padding:30px;">เกิดข้อผิดพลาดในการโหลดข้อมูล</div>';
+  } else {
+    document.getElementById('results').innerHTML = `
+      <div style="color:white; text-align:center; padding:30px;">
+        เกิดข้อผิดพลาดในการโหลดข้อมูล (Server ตอบสนองช้าเกินไป)<br>
+        <button class="btn-sm refresh-btn" style="margin-top:12px; padding:8px 16px;" onclick="loadFromGoogleSheets()">🔄 ลองใหม่อีกครั้ง</button>
+      </div>`;
   }
 }
 
