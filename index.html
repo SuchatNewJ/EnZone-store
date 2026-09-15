@@ -320,41 +320,33 @@ async function loadFromGoogleSheets() {
 
   document.getElementById('results').innerHTML = '<div style="color:white; text-align:center; padding:30px;">กำลังโหลดข้อมูล...</div>';
 
-  let responseText = null;
-  let attempts = 0;
-  const maxAttempts = 2;
+  try {
+    // กำหนดเวลา Timeout ไว้ที่ 20 วินาที
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 20000);
 
-  while (attempts < maxAttempts && !responseText) {
-    attempts++;
-    try {
-      // ลองวิธี JSONP ก่อนเป็นหลักเพื่อรองรับการดึงรูปภาพคอลัมน์ U
-      responseText = await fetchWithJSONP(url);
-    } catch (jsonpErr) {
-      console.warn(`JSONP Attempt ${attempts} failed, trying Direct Fetch...`);
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 15000);
-        
-        const r = await fetch(url, { signal: controller.signal });
-        clearTimeout(timeoutId);
+    const response = await fetch(url, { signal: controller.signal });
+    clearTimeout(timeoutId);
 
-        if (r.ok) responseText = await r.text();
-      } catch (fetchErr) {
-        console.warn(`Fetch Attempt ${attempts} failed.`);
-      }
+    if (!response.ok) throw new Error(`HTTP Error status: ${response.status}`);
+
+    const responseText = await response.text();
+    
+    // ตรวจสอบว่าสิ่งที่ตอบกลับมาเป็น JSON จริง ไม่ใช่หน้า Login ของ Google
+    if (responseText.trim().startsWith('<!DOCTYPE html>') || responseText.includes('google-signin')) {
+      throw new Error('Apps Script ติดสิทธิ์ Permission (กรุณาตั้งค่า Who has access เป็น Anyone)');
     }
-  }
 
-  if (responseText) {
     parseData(responseText);
     localStorage.setItem('sheetUrl', url);
-
     document.getElementById('setupBox').style.display = 'none';
     document.getElementById('searchBox').classList.add('active');
-  } else {
+
+  } catch (error) {
+    console.error('Fetch Error:', error);
     document.getElementById('results').innerHTML = `
       <div style="color:white; text-align:center; padding:30px;">
-        เกิดข้อผิดพลาดในการโหลดข้อมูล (Server ตอบสนองช้าเกินไป)<br>
+        เกิดข้อผิดพลาดในการโหลดข้อมูล (${error.message})<br>
         <button class="btn-sm refresh-btn" style="margin-top:12px; padding:8px 16px;" onclick="loadFromGoogleSheets()">🔄 ลองใหม่อีกครั้ง</button>
       </div>`;
   }
