@@ -66,7 +66,7 @@ body {
   color: #667eea;
 }
 
-.stats-inline { display: flex; gap: 6px; }
+.stats-inline { display: flex; gap: 6px; flex-wrap: wrap; }
 .stat-badge {
   background: #f0f4ff;
   border: 1px solid #c7d2fe;
@@ -154,6 +154,7 @@ body {
       <div class="stats-inline">
         <div class="stat-badge">พบค้นหา: <strong id="foundProducts">0</strong></div>
         <div class="stat-badge">ทั้งหมด: <strong id="totalProducts">0</strong></div>
+        <div class="stat-badge" id="statusBadge">-</div>
       </div>
       <div class="btn-row-compact">
         <button class="btn-sm refresh-btn" onclick="refreshData()">🔄 รีเฟรช</button>
@@ -178,37 +179,33 @@ body {
 </div>
 
 <script>
+// วาง URL /exec ของ Apps Script ตรงนี้ เพื่อให้ทุกเครื่องเปิดใช้ได้ทันทีโดยไม่ต้องตั้งค่า
+const DEFAULT_URL = '';
+const CACHE_KEY = 'ez_products_cache_v1';
+const PAGE_SIZE = 60;
+
 let products = [];
+let currentItems = [];
+let shown = PAGE_SIZE;
 
-// ขยายเวลา Timeout เป็น 25 วินาที เพื่อรองรับ Cold Start ของ Apps Script
-function fetchWithJSONP(url) {
-  return new Promise((resolve, reject) => {
-    const cbName = 'cb_' + Date.now();
-    const script = document.createElement('script');
-    
-    const timer = setTimeout(() => { 
-      cleanup(); 
-      reject(new Error('JSONP timeout')); 
-    }, 25000);
+const $ = id => document.getElementById(id);
 
-    function cleanup() {
-      clearTimeout(timer);
-      delete window[cbName];
-      if (script.parentNode) script.parentNode.removeChild(script);
-    }
-
-    window[cbName] = function(data) { cleanup(); resolve(JSON.stringify(data)); };
-    script.src = url + (url.includes('?') ? '&' : '?') + 'callback=' + cbName;
-    script.onerror = () => { cleanup(); reject(new Error('JSONP error')); };
-    document.head.appendChild(script);
-  });
+function esc(s) {
+  return String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 }
 
 function fixImageUrl(url) {
   if (!url) return '';
-  let cleaned = String(url).trim();
+  const cleaned = String(url).trim();
   if (!cleaned || cleaned === 'undefined' || cleaned === 'null') return '';
-  return encodeURI(cleaned);
+  return cleaned.includes('%') ? cleaned : encodeURI(cleaned); // กัน encode ซ้ำ
+}
+
+// ให้ Cloudinary ย่อรูปและเลือกฟอร์แมตให้อัตโนมัติ
+function thumb(url, w = 400) {
+  if (!url || !url.includes('res.cloudinary.com') || !url.includes('/image/upload/')) return url;
+  if (url.includes('/upload/f_auto') || url.includes('/upload/w_')) return url;
+  return url.replace('/image/upload/', `/image/upload/f_auto,q_auto,w_${w},c_limit/`);
 }
 
 function findColumnIndices(headers) {
@@ -227,162 +224,218 @@ function findColumnIndices(headers) {
 function parseData(jsonText) {
   try {
     const data = JSON.parse(jsonText);
-    if (Array.isArray(data) && data.length > 1) {
-      const headers = data[0];
-      const idx = findColumnIndices(headers);
+    if (!Array.isArray(data) || data.length < 2) return false;
+    const idx = findColumnIndices(data[0]);
 
-      products = data.slice(1).map((row, index) => {
-        const rawImg = (idx.image !== -1 && row[idx.image]) ? row[idx.image] : '';
-        return {
-          id: (idx.id !== -1 && row[idx.id]) ? row[idx.id] : `ITEM-${index + 1}`,
-          name: (idx.name !== -1 && row[idx.name]) ? row[idx.name] : (row[1] || 'ไม่มีชื่อสินค้า'),
-          brand: (idx.brand !== -1 && row[idx.brand]) ? row[idx.brand] : (row[2] || '-'),
-          category: (idx.category !== -1 && row[idx.category]) ? row[idx.category] : (row[3] || '-'),
-          price: (idx.price !== -1 && row[idx.price]) ? row[idx.price] : (row[4] || 0),
-          qty: (idx.qty !== -1 && row[idx.qty]) ? row[idx.qty] : (row[5] || 0),
-          image: fixImageUrl(rawImg)
-        };
-      });
+    products = data.slice(1).map((row, index) => {
+      const rawImg = (idx.image !== -1 && row[idx.image]) ? row[idx.image] : '';
+      return {
+        id: (idx.id !== -1 && row[idx.id]) ? row[idx.id] : `ITEM-${index + 1}`,
+        name: (idx.name !== -1 && row[idx.name]) ? row[idx.name] : (row[1] || 'ไม่มีชื่อสินค้า'),
+        brand: (idx.brand !== -1 && row[idx.brand]) ? row[idx.brand] : (row[2] || '-'),
+        category: (idx.category !== -1 && row[idx.category]) ? row[idx.category] : (row[3] || '-'),
+        price: (idx.price !== -1 && row[idx.price]) ? row[idx.price] : (row[4] || 0),
+        qty: (idx.qty !== -1 && row[idx.qty]) ? row[idx.qty] : (row[5] || 0),
+        image: fixImageUrl(rawImg)
+      };
+    });
 
-      document.getElementById('totalProducts').textContent = products.length;
-      renderProducts(products);
-    }
-  } catch(e) {
-    console.error("Parse Error", e);
+    $('totalProducts').textContent = products.length;
+    applyFilter();
+    return true;
+  } catch (e) {
+    console.error('Parse Error', e);
+    return false;
   }
 }
 
-function renderProducts(items) {
-  const container = document.getElementById('results');
-  document.getElementById('foundProducts').textContent = items.length;
+function cardHtml(p) {
+  const hasImage = p.image && p.image.length > 5;
+  const imgHtml = hasImage
+    ? `<img src="${esc(thumb(p.image))}" alt="${esc(p.name)}" width="400" height="200" loading="lazy" decoding="async" onerror="this.onerror=null; this.parentElement.className='product-image no-image'; this.parentElement.innerHTML='📷 รูปภาพไม่สมบูรณ์';">`
+    : '📷 ไม่มีรูปภาพ';
 
-  if (items.length === 0) {
+  return `
+    <div class="product-card">
+      <div class="product-image ${!hasImage ? 'no-image' : ''}">${imgHtml}</div>
+      <div class="product-body">
+        <div class="product-name">${esc(p.name)}</div>
+        <span class="product-id">รหัส: ${esc(p.id)}</span>
+        <div class="product-info">
+          <div class="info-row">
+            <span style="color:#64748b;">ยี่ห้อ:</span>
+            <span class="brand-badge">${esc(p.brand)}</span>
+          </div>
+          <div class="info-row">
+            <span style="color:#64748b;">หมวดหมู่:</span>
+            <span class="category-badge">${esc(p.category)}</span>
+          </div>
+          <div class="info-row">
+            <span style="color:#64748b;">คงเหลือ:</span>
+            <span class="quantity-badge">${Number(p.qty).toLocaleString()} ชิ้น</span>
+          </div>
+          <div class="info-row" style="margin-top:4px;">
+            <span style="color:#64748b;">ราคา:</span>
+            <span class="price">฿${Number(p.price).toLocaleString()}</span>
+          </div>
+        </div>
+      </div>
+    </div>`;
+}
+
+function renderProducts(items) {
+  currentItems = items;
+  draw();
+}
+
+function draw() {
+  const container = $('results');
+  $('foundProducts').textContent = currentItems.length;
+
+  if (currentItems.length === 0) {
     container.innerHTML = `<div style="grid-column: 1/-1; color:white; text-align:center; padding:40px;">ไม่พบสินค้าที่ค้นหา</div>`;
     return;
   }
 
-  container.innerHTML = items.map(p => {
-    const hasImage = p.image && p.image.length > 5;
-    const imgHtml = hasImage 
-      ? `<img src="${p.image}" alt="${p.name}" loading="lazy" onerror="this.onerror=null; this.parentElement.className='product-image no-image'; this.parentElement.innerHTML='📷 รูปภาพไม่สมบูรณ์';">`
-      : '📷 ไม่มีรูปภาพ';
-
-    return `
-      <div class="product-card">
-        <div class="product-image ${!hasImage ? 'no-image' : ''}">
-          ${imgHtml}
-        </div>
-        <div class="product-body">
-          <div class="product-name">${p.name}</div>
-          <span class="product-id">รหัส: ${p.id}</span>
-          <div class="product-info">
-            <div class="info-row">
-              <span style="color:#64748b;">ยี่ห้อ:</span>
-              <span class="brand-badge">${p.brand}</span>
-            </div>
-            <div class="info-row">
-              <span style="color:#64748b;">หมวดหมู่:</span>
-              <span class="category-badge">${p.category}</span>
-            </div>
-            <div class="info-row">
-              <span style="color:#64748b;">คงเหลือ:</span>
-              <span class="quantity-badge">${Number(p.qty).toLocaleString()} ชิ้น</span>
-            </div>
-            <div class="info-row" style="margin-top:4px;">
-              <span style="color:#64748b;">ราคา:</span>
-              <span class="price">฿${Number(p.price).toLocaleString()}</span>
-            </div>
-          </div>
-        </div>
-      </div>
-    `;
-  }).join('');
+  let html = currentItems.slice(0, shown).map(cardHtml).join('');
+  if (currentItems.length > shown) {
+    html += `<div style="grid-column:1/-1; text-align:center; padding:10px;">
+      <button class="btn-sm refresh-btn" style="padding:10px 24px; font-size:14px;" onclick="showMore()">แสดงเพิ่ม (เหลืออีก ${currentItems.length - shown})</button>
+    </div>`;
+  }
+  container.innerHTML = html;
 }
 
-// Search Filter
-document.getElementById('searchInput')?.addEventListener('input', function(e) {
-  const query = e.target.value.toLowerCase().trim();
+function showMore() {
+  shown += PAGE_SIZE;
+  draw();
+}
+
+// Search Filter (ค้นหาในข้อมูลที่โหลดแล้ว ไม่เรียก API)
+function applyFilter() {
+  const query = $('searchInput').value.toLowerCase().trim();
   if (!query) { renderProducts(products); return; }
 
-  const keywords = query.split(' ').filter(k => k.length > 0);
-  const filtered = products.filter(p => {
+  const keywords = query.split(/\s+/);
+  renderProducts(products.filter(p => {
     const targetText = `${p.id} ${p.name} ${p.brand} ${p.category}`.toLowerCase();
     return keywords.every(kw => targetText.includes(kw));
-  });
+  }));
+}
 
-  renderProducts(filtered);
+let searchTimer;
+$('searchInput').addEventListener('input', () => {
+  clearTimeout(searchTimer);
+  searchTimer = setTimeout(() => { shown = PAGE_SIZE; applyFilter(); }, 150);
 });
 
-// โหลดข้อมูลแบบ Retry และสลับการดึงเพื่อความเสถียรสูงสุด
+// ---------- โหลดข้อมูล ----------
+async function fetchWithRetry(url, tries = 3, timeoutMs = 25000) {
+  let lastErr;
+  for (let i = 0; i < tries; i++) {
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, { signal: ctrl.signal });
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const text = await res.text();
+      if (text.trim().startsWith('<')) {
+        throw new Error('Apps Script ติดสิทธิ์ Permission (ตั้งค่า Who has access เป็น Anyone)');
+      }
+      return text;
+    } catch (e) {
+      lastErr = e.name === 'AbortError' ? new Error('โหลดนานเกินกำหนด') : e;
+      if (i < tries - 1) await new Promise(r => setTimeout(r, 1500 * (i + 1)));
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+  throw lastErr;
+}
+
+function fmtTime(ts) {
+  return new Date(ts).toLocaleTimeString('th-TH', { hour: '2-digit', minute: '2-digit' });
+}
+function setStatus(t) { $('statusBadge').textContent = t; }
+function showApp() {
+  $('setupBox').style.display = 'none';
+  $('searchBox').classList.add('active');
+}
+
+// แสดงข้อมูลที่เก็บไว้ในเครื่องทันที
+function loadCached(url) {
+  try {
+    const c = JSON.parse(localStorage.getItem(CACHE_KEY) || 'null');
+    if (c && c.url === url && c.text && parseData(c.text)) {
+      showApp();
+      setStatus('ข้อมูลเมื่อ ' + fmtTime(c.ts));
+      return true;
+    }
+  } catch (e) {}
+  return false;
+}
+
 async function loadFromGoogleSheets() {
-  const url = document.getElementById('sheetUrl').value.trim();
+  const url = $('sheetUrl').value.trim();
   if (!url) return;
 
-  document.getElementById('results').innerHTML = '<div style="color:white; text-align:center; padding:30px;">กำลังโหลดข้อมูล...</div>';
+  const hasCache = products.length > 0 || loadCached(url);
+  if (hasCache) {
+    setStatus('กำลังอัปเดต...');
+  } else {
+    $('results').innerHTML = '<div style="color:white; text-align:center; padding:30px;">กำลังโหลดข้อมูล...</div>';
+  }
 
   try {
-    // กำหนดเวลา Timeout ไว้ที่ 20 วินาที
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 20000);
+    const text = await fetchWithRetry(url);
+    if (!parseData(text)) throw new Error('รูปแบบข้อมูลไม่ถูกต้อง');
 
-    const response = await fetch(url, { signal: controller.signal });
-    clearTimeout(timeoutId);
-
-    if (!response.ok) throw new Error(`HTTP Error status: ${response.status}`);
-
-    const responseText = await response.text();
-    
-    // ตรวจสอบว่าสิ่งที่ตอบกลับมาเป็น JSON จริง ไม่ใช่หน้า Login ของ Google
-    if (responseText.trim().startsWith('<!DOCTYPE html>') || responseText.includes('google-signin')) {
-      throw new Error('Apps Script ติดสิทธิ์ Permission (กรุณาตั้งค่า Who has access เป็น Anyone)');
-    }
-
-    parseData(responseText);
+    const ts = Date.now();
+    try { localStorage.setItem(CACHE_KEY, JSON.stringify({ url, text, ts })); } catch (e) {}
     localStorage.setItem('sheetUrl', url);
-    document.getElementById('setupBox').style.display = 'none';
-    document.getElementById('searchBox').classList.add('active');
-
+    showApp();
+    setStatus('อัปเดต ' + fmtTime(ts));
   } catch (error) {
     console.error('Fetch Error:', error);
-    document.getElementById('results').innerHTML = `
+    if (hasCache) { setStatus('อัปเดตไม่สำเร็จ (ใช้ข้อมูลเดิม)'); return; }
+    $('results').innerHTML = `
       <div style="color:white; text-align:center; padding:30px;">
-        เกิดข้อผิดพลาดในการโหลดข้อมูล (${error.message})<br>
+        เกิดข้อผิดพลาดในการโหลดข้อมูล (${esc(error.message)})<br>
         <button class="btn-sm refresh-btn" style="margin-top:12px; padding:8px 16px;" onclick="loadFromGoogleSheets()">🔄 ลองใหม่อีกครั้ง</button>
       </div>`;
   }
 }
 
 function refreshData() {
-  const savedUrl = localStorage.getItem('sheetUrl');
-  if (savedUrl) loadFromGoogleSheets();
+  loadFromGoogleSheets();
 }
 
 function openChangeUrlModal() {
-  document.getElementById('newUrlInput').value = localStorage.getItem('sheetUrl') || '';
-  document.getElementById('changeUrlModal').classList.add('active');
+  $('newUrlInput').value = localStorage.getItem('sheetUrl') || $('sheetUrl').value || '';
+  $('changeUrlModal').classList.add('active');
 }
 
 function closeChangeUrlModal() {
-  document.getElementById('changeUrlModal').classList.remove('active');
+  $('changeUrlModal').classList.remove('active');
 }
 
 function saveNewUrl() {
-  const newUrl = document.getElementById('newUrlInput').value.trim();
+  const newUrl = $('newUrlInput').value.trim();
   if (newUrl) {
     localStorage.setItem('sheetUrl', newUrl);
-    document.getElementById('sheetUrl').value = newUrl;
+    $('sheetUrl').value = newUrl;
     closeChangeUrlModal();
     loadFromGoogleSheets();
   }
 }
 
 window.addEventListener('DOMContentLoaded', () => {
-  const savedUrl = localStorage.getItem('sheetUrl');
-  if (savedUrl) {
-    document.getElementById('sheetUrl').value = savedUrl;
+  const url = localStorage.getItem('sheetUrl') || DEFAULT_URL;
+  if (url) {
+    $('sheetUrl').value = url;
     loadFromGoogleSheets();
   } else {
-    document.getElementById('setupBox').style.display = 'block';
+    $('setupBox').style.display = 'block';
   }
 });
 </script>
