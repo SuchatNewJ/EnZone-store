@@ -180,7 +180,7 @@ body {
 
 <script>
 // วาง URL /exec ของ Apps Script ตรงนี้ เพื่อให้ทุกเครื่องเปิดใช้ได้ทันทีโดยไม่ต้องตั้งค่า
-const DEFAULT_URL = 'https://script.google.com/macros/s/AKfycbxdOepefSIk2_pbB1JFrtbjPezXg_USNVaH94UTw4Z51MV4vBqNaWrHtZNtjV5F0Uu0Sg/exec';
+const DEFAULT_URL = '';
 const CACHE_KEY = 'ez_products_cache_v1';
 const PAGE_SIZE = 60;
 
@@ -210,15 +210,25 @@ function thumb(url, w = 400) {
 
 function findColumnIndices(headers) {
   const h = headers.map(item => String(item).toLowerCase().trim());
-  return {
-    id: h.findIndex(k => k === 'productid' || k.includes('id') || k.includes('รหัส')),
-    name: h.findIndex(k => k === 'productname' || k.includes('name') || k.includes('ชื่อ') || k.includes('สินค้า')),
-    brand: h.findIndex(k => k.includes('brand') || k.includes('ยี่ห้อ')),
-    category: h.findIndex(k => k.includes('category') || k.includes('หมวดหมู่')),
-    price: h.findIndex(k => k.includes('price') || k.includes('ราคา')),
-    qty: h.findIndex(k => k.includes('qty') || k.includes('stock') || k.includes('จำนวน')),
-    image: h.findIndex(k => k === 'imageurl' || k.includes('image') || k.includes('img') || k.includes('รูป'))
+  // หาชื่อคอลัมน์ที่ตรงเป๊ะก่อน ถ้าไม่เจอค่อยหาแบบคร่าว ๆ
+  const pick = (exact, loose) => {
+    const i = h.findIndex(k => exact.includes(k));
+    return i !== -1 ? i : h.findIndex(loose);
   };
+  return {
+    id: pick(['productid'], k => k.includes('id') || k.includes('รหัส')),
+    name: pick(['productname'], k => k.includes('name') || k.includes('ชื่อ') || k.includes('สินค้า')),
+    brand: pick(['brand'], k => k.includes('brand') || k.includes('ยี่ห้อ')),
+    category: pick(['category'], k => k.includes('category') || k.includes('หมวดหมู่')),
+    price: pick(['sellprice'], k => k.includes('sellprice') || k.includes('ราคาขาย')),
+    qty: pick(['quantity'], k => (k.includes('qty') && !k.includes('initial')) || k.includes('คงเหลือ')),
+    image: pick(['imageurl'], k => k.includes('image') || k.includes('img') || k.includes('รูป'))
+  };
+}
+
+function toNum(v) {
+  const n = parseFloat(String(v).replace(/,/g, ''));
+  return isNaN(n) ? 0 : n;
 }
 
 function parseData(jsonText) {
@@ -234,8 +244,8 @@ function parseData(jsonText) {
         name: (idx.name !== -1 && row[idx.name]) ? row[idx.name] : (row[1] || 'ไม่มีชื่อสินค้า'),
         brand: (idx.brand !== -1 && row[idx.brand]) ? row[idx.brand] : (row[2] || '-'),
         category: (idx.category !== -1 && row[idx.category]) ? row[idx.category] : (row[3] || '-'),
-        price: (idx.price !== -1 && row[idx.price]) ? row[idx.price] : (row[4] || 0),
-        qty: (idx.qty !== -1 && row[idx.qty]) ? row[idx.qty] : (row[5] || 0),
+        price: idx.price !== -1 ? toNum(row[idx.price]) : 0,
+        qty: idx.qty !== -1 ? toNum(row[idx.qty]) : 0,
         image: fixImageUrl(rawImg)
       };
     });
