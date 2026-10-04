@@ -66,6 +66,19 @@ body {
   color: #667eea;
 }
 
+.stock-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: #1e293b;
+  cursor: pointer;
+  white-space: nowrap;
+  user-select: none;
+}
+.stock-toggle input { width: 16px; height: 16px; accent-color: #10B981; cursor: pointer; }
+
 .stats-inline { display: flex; gap: 6px; flex-wrap: wrap; }
 .stat-badge {
   background: #f0f4ff;
@@ -151,6 +164,7 @@ body {
         <input type="text" id="searchInput" placeholder="ค้นหา รหัส, ชื่อ, ยี่ห้อ..." autocomplete="off">
         <span class="search-icon">🔍</span>
       </div>
+      <label class="stock-toggle"><input type="checkbox" id="inStockOnly"> แสดงเฉพาะที่มีของ</label>
       <div class="stats-inline">
         <div class="stat-badge">พบค้นหา: <strong id="foundProducts">0</strong></div>
         <div class="stat-badge">ทั้งหมด: <strong id="totalProducts">0</strong></div>
@@ -304,34 +318,64 @@ function draw() {
 
   if (currentItems.length === 0) {
     container.innerHTML = `<div style="grid-column: 1/-1; color:white; text-align:center; padding:40px;">ไม่พบสินค้าที่ค้นหา</div>`;
+    setupSentinel();
     return;
   }
 
-  let html = currentItems.slice(0, shown).map(cardHtml).join('');
-  if (currentItems.length > shown) {
-    html += `<div style="grid-column:1/-1; text-align:center; padding:10px;">
-      <button class="btn-sm refresh-btn" style="padding:10px 24px; font-size:14px;" onclick="showMore()">แสดงเพิ่ม (เหลืออีก ${currentItems.length - shown})</button>
-    </div>`;
-  }
-  container.innerHTML = html;
+  container.innerHTML = currentItems.slice(0, shown).map(cardHtml).join('');
+  setupSentinel();
+}
+
+// เลื่อนใกล้สุดหน้าแล้วโหลดเพิ่มให้อัตโนมัติ (ไม่ต้องกดปุ่ม)
+let observer;
+function setupSentinel() {
+  if (observer) observer.disconnect();
+  const old = $('sentinel');
+  if (old) old.remove();
+  if (currentItems.length <= shown) return;
+
+  const s = document.createElement('div');
+  s.id = 'sentinel';
+  s.style.cssText = 'grid-column:1/-1; height:1px;';
+  $('results').appendChild(s);
+
+  observer = new IntersectionObserver(entries => {
+    if (entries[0].isIntersecting) showMore();
+  }, { rootMargin: '800px' });
+  observer.observe(s);
 }
 
 function showMore() {
+  const start = shown;
   shown += PAGE_SIZE;
-  draw();
+  const html = currentItems.slice(start, shown).map(cardHtml).join('');
+  const s = $('sentinel');
+  if (s) s.insertAdjacentHTML('beforebegin', html);
+  else $('results').insertAdjacentHTML('beforeend', html);
+  setupSentinel();
 }
 
 // Search Filter (ค้นหาในข้อมูลที่โหลดแล้ว ไม่เรียก API)
 function applyFilter() {
   const query = $('searchInput').value.toLowerCase().trim();
-  if (!query) { renderProducts(products); return; }
+  const inStockOnly = $('inStockOnly').checked;
+  const keywords = query ? query.split(/\s+/) : [];
 
-  const keywords = query.split(/\s+/);
   renderProducts(products.filter(p => {
+    if (inStockOnly && !(p.qty > 0)) return false;
+    if (keywords.length === 0) return true;
     const targetText = `${p.id} ${p.name} ${p.brand} ${p.category}`.toLowerCase();
     return keywords.every(kw => targetText.includes(kw));
   }));
 }
+
+// ช่องติ๊ก "แสดงเฉพาะที่มีของ" (จำค่าที่เลือกไว้ในเครื่อง)
+try { $('inStockOnly').checked = localStorage.getItem('inStockOnly') === '1'; } catch (e) {}
+$('inStockOnly').addEventListener('change', () => {
+  try { localStorage.setItem('inStockOnly', $('inStockOnly').checked ? '1' : '0'); } catch (e) {}
+  shown = PAGE_SIZE;
+  applyFilter();
+});
 
 let searchTimer;
 $('searchInput').addEventListener('input', () => {
